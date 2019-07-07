@@ -1,0 +1,207 @@
+// qiwei 06/16/2017
+drop query SITS_R
+create query SITS_R()
+for graph state_estimation{
+ListAccum<vertex> @@M_list;
+MapAccum<double, ListAccum<vertex>> @@visit;
+ListAccum<double> @@inte_residual;
+ListAccum<double> @@idx_residual;
+ListAccum<double> @@max_residual;
+
+ArrayAccum<SumAccum<double>> @@cor_residual[];
+ArrayAccum<SumAccum<double>> @@final_error[];
+ArrayAccum<SumAccum<double>> @@inj_cor[];
+ArrayAccum<SumAccum<double>> @@pf_cor[];
+
+ListAccum<ListAccum<double>> @@R_c;
+ListAccum<ListAccum<double>> @@R_i;
+
+int edgeList_size = 0;
+int m_c = 0;
+double iter = 0;
+double con_Tx_s = 0;
+bool flg_1 = false;
+double group = 0;
+uint id= 0;
+ListAccum<edge> @@edgeList;
+//***************SITS*************************
+	T0 = {GNode.*}; //start from all vertices in the graph
+	T0 = select s
+		 from T0:s-(:e)-:t
+			accum 
+				@@edgeList+=e
+	;
+	log(true, @@edgeList.size());
+	MNodeSet = {MNode.*};	
+	MNodeSet = select s
+	  from MNodeSet:s
+	  post-accum
+			@@M_list+=s
+			// log(true, s.Mid)
+	;
+	print @@M_list;
+	foreach x in @@M_list do 
+		case when (@@visit.size()==0) then
+				Tx = {x};
+				group += 1;
+				@@visit += (group->x);
+				while(con_Tx_s!=Tx.size()) do
+					iter +=1;
+					con_Tx_s = Tx.size(); 
+					Tx = select t 
+						from Tx:s-(Medge:e)-:t
+							// accum
+								// log(true, s.Mid, t.Mid)
+							post-accum
+							case when (@@visit.get(group).contains(t)==false) then
+								@@visit += (group->t)
+							end
+					;
+				end;
+		end;
+		iter = 0;
+		con_Tx_s = 0;
+		flg_1 = false;
+		case when (@@visit.size()!=0) then
+			foreach i in range[1, float_to_int(group)] do 
+				// log(true, group , x, flg_1, @@visit.get(i).contains(x));
+				flg_1= flg_1 or @@visit.get(i).contains(x);
+			END;
+			case when (flg_1==false) then
+				Tx = {x};
+				group += 1;
+				@@visit += (group->x);
+				while(con_Tx_s!=Tx.size()) do
+					iter +=1;
+					con_Tx_s = Tx.size(); 
+					Tx = select t 
+						from Tx:s-(Medge:e)-:t
+							// accum
+								// log(true, s.Mid, t.Mid)
+							post-accum
+							case when (@@visit.get(group).contains(t)==false) then
+								@@visit += (group->t)
+							end
+					;
+				end;
+			end;
+		end;
+	end;
+	print @@visit;
+	log(true, @@visit);
+	foreach i in range[1, @@visit.size()] do
+	    iter = 0;
+		con_Tx_s =0;
+		@@inte_residual.clear();
+		@@idx_residual.clear();
+		foreach j in @@visit.get(i) do 
+			N1 = {j};
+			N1 = select t 
+				from N1:s-(Medge:e)-:t
+					post-accum
+						@@inte_residual += t.residual,
+						@@idx_residual += t.Mid
+		;
+		end;
+		@@R_i += @@idx_residual;
+		@@R_c += @@inte_residual;
+		// log(true, max(@@inte_residual));
+		foreach k in range[1, @@idx_residual.size()] do
+			case when (abs(con_Tx_s) < abs(@@inte_residual.get(k-1))) then
+				con_Tx_s = @@inte_residual.get(k-1);
+				iter = @@idx_residual.get(k-1);
+			END;
+		end;
+		// log(true, iter, @@inte_residual, @@idx_residual);
+		@@max_residual+=iter;
+	end;
+	log(true, @@max_residual);
+	log(true, @@R_c, @@R_i);
+	// foreach i in @@max_residual do 
+		// T0 = select s
+		  // from T0:s-(:e)-:t
+		  // accum
+			// case when (e.M_id == i) or (e.M_id == i-@@edgeList.size()/2) then
+				// e.Ri_eP = 0,
+				// log(true, e.M_id)
+			// End
+		  // post-accum
+			// case when (s.exId == i-@@edgeList.size()) then
+				// s.Ri_vP = 0,
+				// log(true, s.exId)
+			// End
+		// ;
+	// End;
+m_c = T0.size()+@@edgeList.size();
+@@cor_residual.reallocate(T0.size()+@@edgeList.size());
+@@final_error.reallocate(T0.size()+@@edgeList.size());
+@@inj_cor.reallocate(T0.size());
+@@pf_cor.reallocate(@@edgeList.size());
+cal_SR(@@R_c, @@R_i, @@cor_residual, m_c);
+foreach i in range[1, @@cor_residual.size()] do
+	id = i-1;
+	@@final_error[i-1] = BDI_getER(id, @@cor_residual);
+End;
+
+print @@final_error;
+log(true, @@final_error);
+edgeList_size = @@edgeList.size();
+MNodeSet = {MNode.*};	
+MNodeSet = select s
+  from MNodeSet:s
+  post-accum
+    double int_error = 0,
+	case when (s.residual_org>0) then
+		case when (s.Mid<=edgeList_size) then
+			case when (@@cor_residual[s.Mid-1]>0) then
+				log(true,"stsssssssssssssssssssss1", s.Mid),
+				int_error = @@final_error[s.Mid-1],
+				@@pf_cor[s.Mid-1] += -1 * int_error,
+				log(true, @@pf_cor[s.Mid-1])
+			End
+		End,
+		case when (s.Mid>edgeList_size) then
+			case when (@@cor_residual[s.Mid-1]>0) then
+				log(true,"stsssssssssssssssssssss2", s.Mid),
+				int_error = @@final_error[s.Mid-1],
+				@@inj_cor[s.Mid-edgeList_size-1] += -1 * int_error,
+				log(true, @@inj_cor[s.Mid-edgeList_size-1],int_error, @@final_error[s.Mid-1], s.Mid)
+			End
+		End
+	End,
+	case when (s.residual_org<0) then
+		case when (s.Mid<=edgeList_size) then
+			case when (@@cor_residual[s.Mid-1]>0) then
+						log(true,"stsssssssssssssssssssss3", s.Mid),
+				int_error = @@final_error[s.Mid-1],
+				@@pf_cor[s.Mid-1] += int_error
+			End
+		End,
+		case when (s.Mid>edgeList_size) then
+			case when (@@cor_residual[s.Mid-1]>0) then
+					log(true,"stsssssssssssssssssssss4", s.Mid),
+				int_error = @@final_error[s.Mid-1],
+				@@inj_cor[s.Mid-edgeList_size-1] += int_error,
+				log(true, @@inj_cor[s.Mid-edgeList_size-1],int_error, @@final_error[s.Mid-1], s.Mid)
+			End
+		End
+	End
+;
+log(true, @@inj_cor, @@pf_cor);
+T0 = {GNode.*}; //start from all vertices in the graph
+	T0 = select s
+		 from T0:s-(:e)-:t
+			accum 
+				case when (e.reverse == 1) then
+					e.M_P_TLPF += @@pf_cor[e.M_id-1]
+					// log(true, @@pf_cor[e.M_id-1], e.M_P_TLPF, e.M_id)
+				when (e.reverse == 0) then
+					e.M_P_TLPF += @@pf_cor[e.M_id-1]
+				END
+			post-accum
+				s.M_P += @@inj_cor[s.exId-1],
+				log(true, s.M_P)
+;
+
+}
+install query SITS_R

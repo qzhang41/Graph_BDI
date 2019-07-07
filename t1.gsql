@@ -1,0 +1,21 @@
+drop query t1
+create query t1()
+for graph state_estimation{
+ArrayAccum<SumAccum<double>> @@K[][];
+ArrayAccum<SumAccum<double>> @@H[][];
+ArrayAccum<SumAccum<double>> @@S[][];
+@@K.reallocate(2,3);
+@@H.reallocate(2,3);
+@@S.reallocate(3,3);
+foreach i in range[1, 2] do 
+	foreach j in range[1, 3] do
+		@@K[i-1][j-1] += j;
+		@@H[i-1][j-1] += i;
+	End;
+ENd;
+matrix_KH_cal(3,3,@@K,@@H,@@S);
+print @@S;
+print @@K;
+print @@H;
+}
+install query -ui t1

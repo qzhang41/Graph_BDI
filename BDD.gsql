@@ -1,0 +1,819 @@
+// **********************************************************************************************************************************
+// **********************************************************************************************************************************
+// Developed by: Chen Yuan, chen.yuan@geirina.net
+// Version Node-based state estimation with bad data detection, together with the query "state_estimation_complete_weight_improved_v3_gain.gsql"
+
+// History:
+// 06/17/2017 [Chen Yuan] This is query is written for parallel node-based state estimation; Currently, I use tuple to store each column
+//						  information in H matrix and Gain matrix. Later maybe the way directly store each element in H marix and Gain matrix has a better performance.
+// 06/2017~12/2018 [Chen Yuan] Commit updates to improve the performance.
+// 2019/2/15  [Chen Yuan] Added Chi Square distribution for bad data detection
+
+drop query state_estimation_weight_solve
+
+// ==================================================================================================================================
+//		                          Main Function of the Code
+// ==================================================================================================================================	
+
+create query state_estimation_weight_solve(string outputfile, int flatstart, double initial_Vm, double initial_Va, double tol, int IterLim) // TotalM is the number of the system's total measurements
+for graph state_estimation{
+TYPEDEF tuple<int m, int n, double h> inte_H_t_R_i;	
+TYPEDEF tuple<int m, int n, double h> inte_H_t;	
+TYPEDEF tuple<int m, double R> inte_r;	
+// ------------------------------------------------------------------------------------------------
+// 				Define variables and arrays
+// ------------------------------------------------------------------------------------------------
+ 
+ // define the tuple for Gain matrix
+ // sort_id_vertex:     for the G array (key1 based on exId) 
+ //                     - contains information on the nodes and also for the pointer arrays 
+ //typedef tuple<int index, double value, int> sort_id_gain; 
+ // Create ArrayAccum for H matrix and Gain matrix
+ 
+ // define the tuple for Va and Vm
+ // sort_id_vertex:     for the h array (key1 based on exId) 
+ //                     - contains information on the nodes and also for the pointer arrays 
+ //typedef tuple<int index, double value> sort_id; 
+ 
+ // sort_rpi_cpi_matrix:for the L'U' and L"U" matrix HeapAccums (key1 based on rpi and cpi)
+ //                     - contains factorized LU values of B' and B" (both edge and node) 
+ //typedef tuple<int key1, int cpi, double value> sort_rpi_cpi_matrix;
+ 
+ // sort_rpi_vertex:    for the L'U' and L"U" matrix vertex HeapAccums (key1 based on rpi) 
+ //                     - contains pointers, permutation and scaling info  
+ //typedef tuple<int key1, int Lp, int Up, int rp, int cpi, double row_scaling, double col_scaling> sort_rpi_vertex;
+
+ 
+ // SumAccum<int> @@Gsize;
+ // SumAccum<int> @Col_Num = 0; // Calculate Number of columns in Hi matrix
+ // SumAccum<int> @Slack = 0; // Check if there is slack bus
+ // SumAccum<int> @Row_Num = 3; // Calculate Number of columns in Hi matrix, each bus/vertex has 3 measurements (Vi, Pi, Qi), 
+  					 //	so the beginning number is set as 3.
+ MaxAccum<double> @@PI = 3.1415926535898;					 
+ 
+ //string sort_result;
+ string cal_result;
+ double n_b = 0;
+ double m_c = 0;
+ double r_c = 0;
+ double kc = 0;
+ double gamma = 0.4;
+ double threshold = 3;
+ double iter = 0;
+ double con_Tx_s = 0;
+ bool flg_1 = false;
+ double flg_BDI = 0;
+ SumAccum<double> @P = 0;
+ SumAccum<double> @Q = 0;
+ SumAccum<double> @sumB = 0; // store for each node the total B on all of its edges
+ SumAccum<double> @sumBedge = 0; // store for each node the total e.B
+ SumAccum<double> @sumG = 0; // store for each node the total G on all of its edges
+ SumAccum<double> @sumBi = 0; // store for each node the total 1/X (BIJ) on all of its edges		
+
+ 
+ SumAccum<double> @deltaP = 0; // store each bus deltaP
+ SumAccum<double> @deltaQ = 0; // store each bus deltaQ
+ SumAccum<double> @deltaPcal = 0; // store each bus deltaP   testing
+ SumAccum<double> @deltaQcal = 0; // store each bus deltaQ   testing
+ 
+ SumAccum<double> @Vm = 0; // store each bus updated Vm
+ SumAccum<double> @Vs = 0; // store each bus updated Vs
+ SumAccum<double> @deltaVm = 0; // store each bus deltaVm, which is the comparison between Vm's measurement and calcualtion
+ SumAccum<double> @deltaVa = 0; // store each bus deltaVm, which is the comparison between Vm's measurement and calcualtion
+ 
+
+ ArrayAccum<SumAccum<double>> @@H_r_P[];  // store H_P matrix multiplies r_P
+ ArrayAccum<SumAccum<double>> @@H_r_Q[];  // store H_Q matrix multiplies r_Q
+
+ SumAccum<int> @@slackbus = 0;
+ MaxAccum<double> @@max_dVm = 1000000;
+ MaxAccum<double> @@max_dVa = 1000000;
+
+ ArrayAccum<SumAccum<double>> @@Va[];
+ ArrayAccum<SumAccum<double>> @@Vm[];
+ SumAccum<int> @@counter = 0;
+ 
+ // ****************  Bad Data Detection Parameter Definition: ***************************
+ 
+ SumAccum<double> @deltaP_bdt = 0;  // bdt: Bad Data Detection
+ SumAccum<double> @deltaQ_bdt = 0;
+ SumAccum<double> @@error = 0;  // Account data error info for kai square distribution
+ SumAccum<double> @@NumofMeas = 0; // Account the number of measurements
+ double n = 0.0;
+ double freedom_degree = 0;
+ double BadDataIndex = 0.0;
+ double p = 0.95; // probability
+ ListAccum<inte_H_t_R_i> @H_t_R_i;
+ ListAccum<inte_H_t> @H_t;
+ ListAccum<inte_r> @@R_all;
+ ListAccum<vertex> @@M_list;
+ ArrayAccum<SumAccum<double>> @@H_R_m_all[][];
+ ArrayAccum<SumAccum<double>> @@H_t_all[][];
+ ArrayAccum<SumAccum<double>> @@K_all[][];
+ ArrayAccum<SumAccum<double>> @@H_R_m[];
+ ArrayAccum<SumAccum<double>> @@K_m[];
+ ArrayAccum<SumAccum<double>> @@K_m_all[][];
+ ArrayAccum<SumAccum<double>> @@S_all[][];
+ ArrayAccum<SumAccum<double>> @@S_N_all[][];
+ // ListAccum<ListAccum<double>> @@SITS[];
+ // ListAccum<double> @@inte_SITS[];
+ ArrayAccum<SumAccum<double>> @@SIF[][];
+ ArrayAccum<SumAccum<double>> @@SIFS[][];
+ ArrayAccum<SumAccum<double>> @@SS[];
+ // ArrayAccum<SumAccum<double>> @@SITS[][];
+ ArrayAccum<SumAccum<double>> @@residual[];
+ ArrayAccum<SumAccum<double>> @@residual_N[];
+ ListAccum<double> @@inte_residual;
+ ListAccum<double> @@idx_residual;
+ ListAccum<double> @@max_residual;
+ MaxAccum<double> @@slack_bus = 0;
+ SumAccum<double> @@inte_s = 0;
+ SumAccum<double> @visit_v = 0;
+ double group = 0;
+ ListAccum<edge> @@edgeList;
+ MapAccum<double, ListAccum<vertex>> @@visit;
+ // ************************************************************************************
+ // End of variable definition
+ // ************************************************************************************
+ 
+ T0 = {GNode.*}; //start from all vertices in the graph
+ n_b = T0.size(); 
+ @@Va.reallocate(T0.size()-1);
+ @@Vm.reallocate(T0.size());
+ @@H_r_P.reallocate(T0.size()-1);
+ @@H_r_Q.reallocate(T0.size());
+//************* BDI test *****************************************************************
+ //ArrayAccum<ArrayAccum<SumAccum<double>>> @@H_t_R_i[][]; 
+ //@@H_t_R_i.reallocate(T1.size(), T0.size());
+
+ 
+ T0 = select s
+	  from T0:s-(:e)-:t
+	  accum
+		case when (e.K == 0) then 
+           //compute contribution of each branch to the diagonal terms 
+           s.@sumG += e.G,
+		   s.@sumB += -1*e.B + 0.5*e.hB,  // used to construct the B'' matrix for fast-decoupled method, for Q
+		   s.@sumBedge += e.B,  // edges' admittence summation for each node
+           s.@sumBi += -1*e.BIJ,
+		   @@edgeList+=e
+		when (e.K > 0) then
+		//compute contribution of each branch to the diagonal terms
+           double tap_ratio_square = (e.K/e.Kcount)*(e.K/e.Kcount),
+		   double tap_ratio = e.K/e.Kcount,
+           s.@sumG += 1/(tap_ratio_square)*e.G,
+		   s.@sumB += 1/(tap_ratio_square)*(-1*e.B) + 0.5*e.hB, // for Q
+		   s.@sumBedge += e.B/tap_ratio, // edges' admittence summation for each node
+           s.@sumBi += -1*e.BIJ,  // for P
+		   @@edgeList+=e
+		else
+		   double tap_ratio_square = (e.K/e.Kcount)*(e.K/e.Kcount),
+		   double tap_ratio = abs(e.K/e.Kcount),
+		   s.@sumG += e.G,
+		   s.@sumB += -1*e.B + 0.5*e.hB,  // used to construct the B'' matrix for fast-decoupled method, for Q
+		   s.@sumBedge += e.B/tap_ratio, // edges' admittence summation for each node
+           s.@sumBi += -1*e.BIJ,
+		   @@edgeList+=e
+		end
+			    
+	  post-accum
+		//s.@sumGii_P += (s.@sumBi * s.@sumBi)*s.Ri_vP, // diagonal element in row i of system Gain matrix: Hii'*Hii + sum(Hji'*Hji), double check...
+		s.@sumB += s.B,
+		s.@sumG += s.G,
+		CASE WHEN (s.flag == 3) THEN
+			@@slackbus += s.exId
+		END,
+       case when flatstart == 0 then  //not using flat start, set voltage manitude/angle based on input data files
+         case when s.flag == 1 or s.flag == 0 then 
+           s.@P = s.M_P, s.@Q = s.M_Q, s.@Vm = s.M_Vm, s.@Vs = s.M_Va*@@PI/180
+         when s.flag == 2 then 
+           s.@P = s.M_P, s.@Q = s.M_Q, s.@Vm = s.M_Vm, s.@Vs = s.M_Va*@@PI/180
+         when s.flag == 3 then 
+           s.@Vm = s.M_Vm, s.@Vs = s.M_Va*@@PI/180, s.@P = s.M_P, s.@Q = s.M_Q
+         when s.flag == 4 then 
+           s.@Vm = 0, s.@Vs = 0, s.@P =0 , s.@Q =0
+         end
+       else                           //flat start, set voltage magnitude/angle based on user input
+         case when s.flag == 1 or s.flag == 0 then 
+           s.@P = s.M_P, s.@Q = s.M_Q, s.@Vm = initial_Vm, s.@Vs = initial_Va
+         when s.flag == 2 then 
+           s.@P = s.M_P, s.@Q = s.M_Q, s.@Vm = initial_Vm, s.@Vs = initial_Va
+         when s.flag == 3 then 
+           s.@Vm = s.M_Vm, s.@Vs = initial_Va, s.@P = s.M_P, s.@Q = s.M_Q
+         when s.flag == 4 then 
+           s.@Vm = 0, s.@Vs = 0, s.@P = 0, s.@Q = 0
+         end
+       end;
+	   m_c =  n_b+@@edgeList.size();
+	   @@H_R_m_all.reallocate(n_b, m_c);
+	   @@H_t_all.reallocate(n_b-1, m_c);
+	   @@H_R_m.reallocate(n_b);
+	   @@K_m_all.reallocate(n_b, m_c);
+	   @@K_m.reallocate(n_b);
+	   @@K_all.reallocate(n_b, m_c);
+	   @@S_all.reallocate(m_c, m_c);
+	   @@S_N_all.reallocate(m_c, m_c);
+	   @@residual.reallocate(m_c);
+	   @@residual_N.reallocate(m_c);
+	   @@SIF.reallocate(m_c, m_c);
+	   @@SIFS.reallocate(m_c, m_c);
+	   @@SS.reallocate(m_c);
+//	   log(true, s.exId, s.@neighbor_BIJ, s.@Gip);
+
+
+ 
+ // ************************************** Iteration *********************************************
+		 
+ while( @@max_dVm > tol or @@max_dVa > tol) limit IterLim
+ {
+	  @@counter += 1;
+	  @@max_dVm = 0;
+	  @@max_dVa = 0;
+	
+	//************************************ P measurement update **************************************
+	// *************************************** Building H'*r *************************************************
+	T0 = select s
+	  from T0:s-(:e)-:t
+	  accum
+		double newG = 0,
+		double newB = 0,
+		double tap_ratio = abs(e.K/e.Kcount),
+		double tap_ratio_square = (e.K/e.Kcount)*(e.K/e.Kcount),
+		//s.@deltaP = - s.@P,
+		//s.@deltaQ = - s.@Q,
+		//log(true, s.exId, s.@deltaP),
+		case when (e.K == 0 or abs(e.K) == 1) then
+		   s.@deltaP += s.@Vm*t.@Vm * (-1*e.G*cos(s.@Vs-t.@Vs) + (e.B * sin(s.@Vs - t.@Vs)))
+		   
+		   //log(false, "e.B and e.G", s.exId, t.exId, e.G, e.B)
+		else
+		   newG = e.G/tap_ratio,
+		   newB = e.B/tap_ratio,
+		   s.@deltaP += s.@Vm*t.@Vm * (-1*newG*cos(s.@Vs-t.@Vs) + (newB * sin(s.@Vs - t.@Vs)))
+		   //log(false, "e.B and e.G", s.exId, t.exId, newG, newB)             
+		end,
+
+
+		case when (s.exId > @@slackbus) then
+			case when (e.K == 0) then
+				@@H_r_P[s.exId-2] += e.BIJ * (e.M_P_TLPF - (s.@Vm * s.@Vm * e.G - s.@Vm * t.@Vm * (e.G*cos(s.@Vs - t.@Vs) + (-e.B)*sin(s.@Vs - t.@Vs)))) * e.Ri_eP
+			when (e.K > 0) then
+				@@H_r_P[s.exId-2] += e.BIJ * (e.M_P_TLPF - (s.@Vm * s.@Vm * (e.G/tap_ratio_square) - s.@Vm * t.@Vm * ((e.G/tap_ratio)*cos(s.@Vs - t.@Vs) + (-e.B/tap_ratio)*sin(s.@Vs - t.@Vs)))) * e.Ri_eP
+			else
+				@@H_r_P[s.exId-2] += e.BIJ * (e.M_P_TLPF - (s.@Vm * s.@Vm * e.G - s.@Vm * t.@Vm * ((e.G/tap_ratio)*cos(s.@Vs - t.@Vs) + (-e.B/tap_ratio)*sin(s.@Vs - t.@Vs)))) * e.Ri_eP
+			end
+
+		when (s.exId < @@slackbus) then	
+			case when (e.K == 0) then
+				@@H_r_P[s.exId-1] += e.BIJ * (e.M_P_TLPF - (s.@Vm * s.@Vm * e.G - s.@Vm * t.@Vm * (e.G*cos(s.@Vs - t.@Vs) + (-e.B)*sin(s.@Vs - t.@Vs)))) * e.Ri_eP
+			when (e.K > 0) then
+				@@H_r_P[s.exId-1] += e.BIJ * (e.M_P_TLPF - (s.@Vm * s.@Vm * (e.G/tap_ratio_square) - s.@Vm * t.@Vm * ((e.G/tap_ratio)*cos(s.@Vs - t.@Vs) + (-e.B/tap_ratio)*sin(s.@Vs - t.@Vs)))) * e.Ri_eP
+			else
+				@@H_r_P[s.exId-1] += e.BIJ * (e.M_P_TLPF - (s.@Vm * s.@Vm * e.G - s.@Vm * t.@Vm * ((e.G/tap_ratio)*cos(s.@Vs - t.@Vs) + (-e.B/tap_ratio)*sin(s.@Vs - t.@Vs)))) * e.Ri_eP
+			end
+		end,
+
+		case when (t.exId > @@slackbus) then
+			case when (e.K == 0) then
+				@@H_r_P[t.exId-2] += (-1) * e.BIJ * (e.M_P_TLPF - (s.@Vm * s.@Vm * e.G - s.@Vm * t.@Vm * (e.G*cos(s.@Vs - t.@Vs) + (-e.B)*sin(s.@Vs - t.@Vs)))) * e.Ri_eP
+			when (e.K > 0) then
+				@@H_r_P[t.exId-2] += (-1) * e.BIJ * (e.M_P_TLPF - (s.@Vm * s.@Vm * (e.G/tap_ratio_square) - s.@Vm * t.@Vm * ((e.G/tap_ratio)*cos(s.@Vs - t.@Vs) + (-e.B/tap_ratio)*sin(s.@Vs - t.@Vs)))) * e.Ri_eP
+			else
+				@@H_r_P[t.exId-2] += (-1) * e.BIJ * (e.M_P_TLPF - (s.@Vm * s.@Vm * e.G - s.@Vm * t.@Vm * ((e.G/tap_ratio)*cos(s.@Vs - t.@Vs) + (-e.B/tap_ratio)*sin(s.@Vs - t.@Vs)))) * e.Ri_eP 
+			end
+
+		when (t.exId < @@slackbus) then
+
+			case when (e.K == 0) then
+				@@H_r_P[t.exId-1] += (-1) * e.BIJ * (e.M_P_TLPF - (s.@Vm * s.@Vm * e.G - s.@Vm * t.@Vm * (e.G*cos(s.@Vs - t.@Vs) + (-e.B)*sin(s.@Vs - t.@Vs)))) * e.Ri_eP 
+			when (e.K > 0) then
+				@@H_r_P[t.exId-1] += (-1) * e.BIJ * (e.M_P_TLPF - (s.@Vm * s.@Vm * (e.G/tap_ratio_square) - s.@Vm * t.@Vm * ((e.G/tap_ratio)*cos(s.@Vs - t.@Vs) + (-e.B/tap_ratio)*sin(s.@Vs - t.@Vs)))) * e.Ri_eP 
+			else
+				@@H_r_P[t.exId-1] += (-1) * e.BIJ * (e.M_P_TLPF - (s.@Vm * s.@Vm * e.G - s.@Vm * t.@Vm * ((e.G/tap_ratio)*cos(s.@Vs - t.@Vs) + (-e.B/tap_ratio)*sin(s.@Vs - t.@Vs)))) * e.Ri_eP 
+			end
+
+		end
+		   
+		   
+		   
+	  post-accum
+
+		s.@deltaP = s.@P - (s.@deltaP + s.@Vm*s.@Vm*s.@sumG),  
+		case when (s.exId > @@slackbus) then
+			@@H_r_P[s.exId-2] += (-1) * s.@sumBi * s.@deltaP * s.Ri_vP
+		when (s.exId < @@slackbus) then
+			@@H_r_P[s.exId-1] += (-1) * s.@sumBi * s.@deltaP * s.Ri_vP
+		end,
+		
+		case when (s.exId > @@slackbus) then
+			@@Va[s.exId-2] += s.@Vs	
+		when (s.exId < @@slackbus) then
+			@@Va[s.exId-1] += s.@Vs
+		end;
+
+	  
+ T0 = select s
+	  from T0:s-(:e)-:t
+	  accum	
+		CASE WHEN (t.exId > @@slackbus) THEN
+			@@H_r_P[t.exId-2] +=  (-1) * e.BIJ * s.@deltaP * s.Ri_vP
+		WHEN (t.exId < @@slackbus) THEN
+			@@H_r_P[t.exId-1] +=  (-1) * e.BIJ * s.@deltaP * s.Ri_vP
+		END,
+		s.@deltaP = 0;
+
+
+   // ************************************** Solve Gain P *********************************************
+   cal_result = SE_solve_GainP_static(@@Va, @@H_r_P, @@max_dVa); 	//	needing another tuple to store Va, may not need @@GainP
+ 
+   // ************************************** Update Va *****************************************
+	T0 = select s
+       from T0:s
+       post-accum
+		 uint exId = 0,
+		 
+		 CASE WHEN (s.exId > @@slackbus) THEN
+			exId = s.exId - 2,
+			s.@Vs = SE_getVa(exId, @@Va)
+		 WHEN (s.exId < @@slackbus) THEN
+			exId = s.exId - 1,
+			s.@Vs = SE_getVa(exId, @@Va)
+		 END;
+		 
+	     @@H_r_P.reallocate(T0.size()-1);
+		 @@Va.reallocate(T0.size()-1); // in radian  
+		 print @@max_dVa;
+
+		 
+		 
+
+	 //************************************ Q measurement update **************************************
+	 // ********************************* Building H'*r *************************************************
+	T0 = select s
+	  from T0:s-(:e)-:t
+	  accum
+		double newG = 0,
+		double newB = 0,
+		double tap_ratio = abs(e.K/e.Kcount),
+		double tap_ratio_square = (e.K/e.Kcount)*(e.K/e.Kcount),
+		case when (e.K == 0 or abs(e.K) == 1) then
+		   s.@deltaQ += s.@Vm*t.@Vm * (-1*e.G*sin(s.@Vs-t.@Vs) - (e.B * cos(s.@Vs - t.@Vs)))
+		else
+		   newG = e.G/tap_ratio,
+		   newB = e.B/tap_ratio,
+		   s.@deltaQ += s.@Vm*t.@Vm * (-1*newG*sin(s.@Vs-t.@Vs) - (newB * cos(s.@Vs - t.@Vs)))
+		   //log(false, "e.B and e.G", s.exId, t.exId, newG, newB)             
+		end,
+
+		case when (e.K == 0) then 
+
+			@@H_r_Q[s.exId-1] += (e.B - e.hB) * (e.M_Q_TLPF - (- s.@Vm * s.@Vm * (-e.B + 0.5*e.hB) - s.@Vm * t.@Vm * (e.G*sin(s.@Vs - t.@Vs) - (-e.B)*cos(s.@Vs - t.@Vs)))) * e.Ri_eQ,
+			@@H_r_Q[t.exId-1] += (-1) * e.B * (e.M_Q_TLPF - (- s.@Vm * s.@Vm * (-e.B + 0.5*e.hB) - s.@Vm * t.@Vm * (e.G*sin(s.@Vs - t.@Vs) - (-e.B)*cos(s.@Vs - t.@Vs)))) * e.Ri_eQ
+		when (e.K > 0) then
+			double tap_ratio = e.K/e.Kcount,
+			@@H_r_Q[s.exId-1] += (e.B/tap_ratio - e.hB) * (e.M_Q_TLPF - (- s.@Vm * s.@Vm * (-e.B + 0.5*e.hB) / tap_ratio_square - s.@Vm * t.@Vm * ((e.G/tap_ratio)*sin(s.@Vs - t.@Vs) - (-e.B/tap_ratio)*cos(s.@Vs - t.@Vs)))) * e.Ri_eQ,
+			@@H_r_Q[t.exId-1] += (-1) * (e.B/tap_ratio) * (e.M_Q_TLPF - (- s.@Vm * s.@Vm * (-e.B + 0.5*e.hB) / tap_ratio_square - s.@Vm * t.@Vm * ((e.G/tap_ratio)*sin(s.@Vs - t.@Vs) - (-e.B/tap_ratio)*cos(s.@Vs - t.@Vs)))) * e.Ri_eQ
+		else
+			double tap_ratio = abs(e.K/e.Kcount), 			
+			@@H_r_Q[s.exId - 1] += (e.B/tap_ratio - e.hB) * (e.M_Q_TLPF - (- s.@Vm * s.@Vm * (-e.B + 0.5*e.hB) - s.@Vm * t.@Vm * ((e.G/tap_ratio)*sin(s.@Vs - t.@Vs) - (-e.B/tap_ratio)*cos(s.@Vs - t.@Vs)))) * e.Ri_eQ,
+			@@H_r_Q[t.exId - 1] += (-1) * (e.B/tap_ratio) * (e.M_Q_TLPF - (- s.@Vm * s.@Vm * (-e.B + 0.5*e.hB) - s.@Vm * t.@Vm * ((e.G/tap_ratio)*sin(s.@Vs - t.@Vs) - (-e.B/tap_ratio)*cos(s.@Vs - t.@Vs)))) * e.Ri_eQ
+			end
+
+		// case when (e.K == 0) then
+			// s.@Q_TLPF += (t.exId -> (e.M_Q_TLPF - (- s.@Vm * s.@Vm * (-e.B + 0.5*e.hB) - s.@Vm * t.@Vm * (e.G*sin(s.@Vs - t.@Vs) - (-e.B)*cos(s.@Vs - t.@Vs))))) // Transmission line reactive power flow				
+		// when (e.K > 0) then		
+			// s.@Q_TLPF += (t.exId -> (e.M_Q_TLPF - (- s.@Vm * s.@Vm * (-e.B + 0.5*e.hB) / tap_ratio_square - s.@Vm * t.@Vm * ((e.G/tap_ratio)*sin(s.@Vs - t.@Vs) - (-e.B/tap_ratio)*cos(s.@Vs - t.@Vs))))) // Transmission line reactive power flow
+		// else
+			
+			// s.@Q_TLPF += (t.exId -> (e.M_Q_TLPF - (- s.@Vm * s.@Vm * (-e.B + 0.5*e.hB) - s.@Vm * t.@Vm * ((e.G/tap_ratio)*sin(s.@Vs - t.@Vs) - (-e.B/tap_ratio)*cos(s.@Vs - t.@Vs)))))
+		// end
+		   
+	  post-accum
+		s.@deltaQ = s.@Q - (s.@deltaQ - s.@Vm*s.@Vm*s.@sumB),
+		s.@deltaVm = s.M_Vm - s.@Vm,
+		@@H_r_Q[s.exId-1] += (-1) * (2*s.@sumB + s.@sumBedge)* s.@deltaQ * s.Ri_vQ + s.@deltaVm * s.Ri_V,
+		@@Vm[s.exId-1] += s.@Vm;
+	  
+
+ T0 = select s
+	  from T0:s-(:e)-:t
+	  accum
+		case when (e.K == 0) then 
+			@@H_r_Q[t.exId-1] += (-1) * e.B * s.@deltaQ * s.Ri_vQ 
+		when (e.K > 0) then
+			double tap_ratio = e.K/e.Kcount,
+			@@H_r_Q[t.exId-1] += (-1) * (e.B/tap_ratio) * s.@deltaQ * s.Ri_vQ
+		else
+			double tap_ratio = abs(e.K/e.Kcount), 			
+			@@H_r_Q[t.exId - 1] += (-1) * (e.B/tap_ratio) * s.@deltaQ * s.Ri_vQ 
+		end,
+		s.@deltaQ = 0;
+			
+
+   
+
+// ************************************** Solve Gain Q *********************************************
+   cal_result = SE_solve_GainQ_static(@@Vm, @@H_r_Q, @@max_dVm); 	//	needing another tuple to store Vm, may not need @@GainQ
+
+// ************************************** Update Vm *****************************************
+	T0 = select s
+       from T0:s
+       post-accum
+
+		 uint exId = s.exId-1,
+         //s.Vm = SE_getVm(s.exId, @@vertex_Ybus),  // magnitude in p.u.
+         s.@Vm = SE_getVm(exId, @@Vm);  // in radian  
+		 //@@max_dVa = SE_getMAXdVa(@@max_dVa)
+		 
+		 @@H_r_Q.reallocate(T0.size());
+		 @@Vm.reallocate(T0.size());
+
+		 print @@max_dVm;
+	
+ 
+ //print @@edgeList > outputfile; 
+  }
+  
+  // Bad Data Detection - Kai Square
+  T0 = select s
+	   from T0:s-(:e)-:t
+	   accum
+	   double newG = 0,
+	   double newB = 0,
+	   double tap_ratio = abs(e.K/e.Kcount),
+	   double tap_ratio_square = (e.K/e.Kcount)*(e.K/e.Kcount),
+	   case when (e.K == 0 or abs(e.K) == 1) then
+		  s.@deltaP_bdt += s.@Vm*t.@Vm * (-1*e.G*cos(s.@Vs-t.@Vs) + (e.B * sin(s.@Vs - t.@Vs))),
+		  s.@deltaQ_bdt += s.@Vm*t.@Vm * (-1*e.G*sin(s.@Vs-t.@Vs) - (e.B * cos(s.@Vs - t.@Vs)))
+	   else
+		  newG = e.G/tap_ratio,
+		  newB = e.B/tap_ratio,
+		  s.@deltaP_bdt += s.@Vm*t.@Vm * (-1*newG*cos(s.@Vs-t.@Vs) + (newB * sin(s.@Vs - t.@Vs))),
+		  s.@deltaQ_bdt += s.@Vm*t.@Vm * (-1*newG*sin(s.@Vs-t.@Vs) - (newB * cos(s.@Vs - t.@Vs)))
+		  //log(false, "e.B and e.G", s.exId, t.exId, newG, newB)             
+	   end,
+		
+	   case when (e.K == 0) then 
+		   
+		   @@error += (e.M_P_TLPF - (s.@Vm * s.@Vm * e.G - s.@Vm * t.@Vm * (e.G*cos(s.@Vs - t.@Vs) + (-e.B)*sin(s.@Vs - t.@Vs)))) * (e.M_P_TLPF - (s.@Vm * s.@Vm * e.G - s.@Vm * t.@Vm * (e.G*cos(s.@Vs - t.@Vs) + (-e.B)*sin(s.@Vs - t.@Vs)))) * e.Ri_eP * e.Ri_eP,
+		   @@error += (e.M_Q_TLPF - (- s.@Vm * s.@Vm * (-e.B + 0.5*e.hB) - s.@Vm * t.@Vm * (e.G*sin(s.@Vs - t.@Vs) - (-e.B)*cos(s.@Vs - t.@Vs))))*(e.M_Q_TLPF - (- s.@Vm * s.@Vm * (-e.B + 0.5*e.hB) - s.@Vm * t.@Vm * (e.G*sin(s.@Vs - t.@Vs) - (-e.B)*cos(s.@Vs - t.@Vs)))) * e.Ri_eQ * e.Ri_eQ,  // line reactive power flow error
+		   
+		   // debug
+		   double P_TLPF_error = 0.0,
+		   double Q_TLPF_error = 0.0,
+		   P_TLPF_error = (e.M_P_TLPF - (s.@Vm * s.@Vm * e.G - s.@Vm * t.@Vm * (e.G*cos(s.@Vs - t.@Vs) + (-e.B)*sin(s.@Vs - t.@Vs)))) * (e.M_P_TLPF - (s.@Vm * s.@Vm * e.G - s.@Vm * t.@Vm * (e.G*cos(s.@Vs - t.@Vs) + (-e.B)*sin(s.@Vs - t.@Vs)))) * e.Ri_eP * e.Ri_eP,
+		   Q_TLPF_error = (e.M_Q_TLPF - (- s.@Vm * s.@Vm * (-e.B + 0.5*e.hB) - s.@Vm * t.@Vm * (e.G*sin(s.@Vs - t.@Vs) - (-e.B)*cos(s.@Vs - t.@Vs))))*(e.M_Q_TLPF - (- s.@Vm * s.@Vm * (-e.B + 0.5*e.hB) - s.@Vm * t.@Vm * (e.G*sin(s.@Vs - t.@Vs) - (-e.B)*cos(s.@Vs - t.@Vs)))) * e.Ri_eQ * e.Ri_eQ,
+		   log(true, s.exId, t.exId, P_TLPF_error, Q_TLPF_error)
+	   when (e.K > 0) then
+		   double tap_ratio = e.K/e.Kcount,
+		   @@error += (e.M_P_TLPF - (s.@Vm * s.@Vm * (e.G/tap_ratio_square) - s.@Vm * t.@Vm * ((e.G/tap_ratio)*cos(s.@Vs - t.@Vs) + (-e.B/tap_ratio)*sin(s.@Vs - t.@Vs)))) * (e.M_P_TLPF - (s.@Vm * s.@Vm * (e.G/tap_ratio_square) - s.@Vm * t.@Vm * ((e.G/tap_ratio)*cos(s.@Vs - t.@Vs) + (-e.B/tap_ratio)*sin(s.@Vs - t.@Vs)))) * e.Ri_eP * e.Ri_eP,
+		   @@error += (e.M_Q_TLPF - (- s.@Vm * s.@Vm * (-e.B + 0.5*e.hB) / tap_ratio_square - s.@Vm * t.@Vm * ((e.G/tap_ratio)*sin(s.@Vs - t.@Vs) - (-e.B/tap_ratio)*cos(s.@Vs - t.@Vs)))) * (e.M_Q_TLPF - (- s.@Vm * s.@Vm * (-e.B + 0.5*e.hB) / tap_ratio_square - s.@Vm * t.@Vm * ((e.G/tap_ratio)*sin(s.@Vs - t.@Vs) - (-e.B/tap_ratio)*cos(s.@Vs - t.@Vs)))) * e.Ri_eQ * e.Ri_eQ,
+		
+		   double P_TLPF_error = 0.0,
+		   double Q_TLPF_error = 0.0,
+		   P_TLPF_error = (e.M_P_TLPF - (s.@Vm * s.@Vm * (e.G/tap_ratio_square) - s.@Vm * t.@Vm * ((e.G/tap_ratio)*cos(s.@Vs - t.@Vs) + (-e.B/tap_ratio)*sin(s.@Vs - t.@Vs)))) * (e.M_P_TLPF - (s.@Vm * s.@Vm * (e.G/tap_ratio_square) - s.@Vm * t.@Vm * ((e.G/tap_ratio)*cos(s.@Vs - t.@Vs) + (-e.B/tap_ratio)*sin(s.@Vs - t.@Vs)))) * e.Ri_eP * e.Ri_eP,
+		   Q_TLPF_error = (e.M_Q_TLPF - (- s.@Vm * s.@Vm * (-e.B + 0.5*e.hB) / tap_ratio_square - s.@Vm * t.@Vm * ((e.G/tap_ratio)*sin(s.@Vs - t.@Vs) - (-e.B/tap_ratio)*cos(s.@Vs - t.@Vs)))) * (e.M_Q_TLPF - (- s.@Vm * s.@Vm * (-e.B + 0.5*e.hB) / tap_ratio_square - s.@Vm * t.@Vm * ((e.G/tap_ratio)*sin(s.@Vs - t.@Vs) - (-e.B/tap_ratio)*cos(s.@Vs - t.@Vs)))) * e.Ri_eQ * e.Ri_eQ,
+		   log(true, s.exId, t.exId, P_TLPF_error, Q_TLPF_error)
+	   else
+		   double tap_ratio = abs(e.K/e.Kcount), 
+		   @@error += (e.M_P_TLPF - (s.@Vm * s.@Vm * e.G - s.@Vm * t.@Vm * ((e.G/tap_ratio)*cos(s.@Vs - t.@Vs) + (-e.B/tap_ratio)*sin(s.@Vs - t.@Vs)))) * (e.M_P_TLPF - (s.@Vm * s.@Vm * e.G - s.@Vm * t.@Vm * ((e.G/tap_ratio)*cos(s.@Vs - t.@Vs) + (-e.B/tap_ratio)*sin(s.@Vs - t.@Vs)))) * e.Ri_eP * e.Ri_eP,
+		   @@error += (e.M_Q_TLPF - (- s.@Vm * s.@Vm * (-e.B + 0.5*e.hB) - s.@Vm * t.@Vm * ((e.G/tap_ratio)*sin(s.@Vs - t.@Vs) - (-e.B/tap_ratio)*cos(s.@Vs - t.@Vs)))) * (e.M_Q_TLPF - (- s.@Vm * s.@Vm * (-e.B + 0.5*e.hB) - s.@Vm * t.@Vm * ((e.G/tap_ratio)*sin(s.@Vs - t.@Vs) - (-e.B/tap_ratio)*cos(s.@Vs - t.@Vs)))) * e.Ri_eQ * e.Ri_eQ,
+
+		   double P_TLPF_error = 0.0,
+		   double Q_TLPF_error = 0.0,
+		   P_TLPF_error = (e.M_P_TLPF - (s.@Vm * s.@Vm * e.G - s.@Vm * t.@Vm * ((e.G/tap_ratio)*cos(s.@Vs - t.@Vs) + (-e.B/tap_ratio)*sin(s.@Vs - t.@Vs)))) * (e.M_P_TLPF - (s.@Vm * s.@Vm * e.G - s.@Vm * t.@Vm * ((e.G/tap_ratio)*cos(s.@Vs - t.@Vs) + (-e.B/tap_ratio)*sin(s.@Vs - t.@Vs)))) * e.Ri_eP * e.Ri_eP,
+		   Q_TLPF_error = (e.M_Q_TLPF - (- s.@Vm * s.@Vm * (-e.B + 0.5*e.hB) - s.@Vm * t.@Vm * ((e.G/tap_ratio)*sin(s.@Vs - t.@Vs) - (-e.B/tap_ratio)*cos(s.@Vs - t.@Vs)))) * (e.M_Q_TLPF - (- s.@Vm * s.@Vm * (-e.B + 0.5*e.hB) - s.@Vm * t.@Vm * ((e.G/tap_ratio)*sin(s.@Vs - t.@Vs) - (-e.B/tap_ratio)*cos(s.@Vs - t.@Vs)))) * e.Ri_eQ * e.Ri_eQ,
+		   log(true, s.exId, t.exId, P_TLPF_error, Q_TLPF_error)		   
+	   end,
+	   IF (e.Ri_eP > 0) THEN @@NumofMeas += 1 END,
+	   IF (e.Ri_eQ > 0) THEN @@NumofMeas += 1 END
+	   post-accum
+	   log(true, @@error),
+	   IF (s.Ri_V > 0) THEN @@NumofMeas += 1 END,
+	   IF (s.Ri_vP > 0) THEN @@NumofMeas += 1 END,
+	   IF (s.Ri_vQ > 0) THEN @@NumofMeas += 1 END,
+	   s.@deltaP_bdt = s.@P - (s.@deltaP_bdt + s.@Vm*s.@Vm*s.@sumG),
+	   s.@deltaQ_bdt = s.@Q - (s.@deltaQ_bdt - s.@Vm*s.@Vm*s.@sumB),
+	   @@error += (s.M_Vm - s.@Vm) * (s.M_Vm - s.@Vm) * s.Ri_V * s.Ri_V,
+	   @@error += s.@deltaP_bdt * s.@deltaP_bdt * s.Ri_vP * s.Ri_vP,
+	   @@error += s.@deltaQ_bdt * s.@deltaQ_bdt * s.Ri_vQ * s.Ri_vQ;
+	   
+	   n = T0.size()*2 - 1;
+	   freedom_degree = @@NumofMeas - n;
+	   log(true, @@NumofMeas, n, freedom_degree);
+	   BadDataIndex = chi_square_index(p, freedom_degree); // chi_square_distribution
+	   print BadDataIndex;
+	   print @@error;
+	   IF (@@error >= BadDataIndex) THEN print "Bad Data Detected";
+	   ELSE print "No Bad Data Detected"; END;
+	   
+	   
+	   
+  print @@counter;
+  print T0.exId, T0.M_Vm, T0.Vm, T0.@Vm, T0.M_Va, T0.@Vs*180/@@PI TO_CSV outputfile;
+//************* BDI test *****************************************************************
+  // ;
+  // T0 = select s
+	   // from T0:s-(:e)-:t
+	    // post-accum
+			// foreach i in range[0,float_to_int (2*@@edgeList.size()+n_b)-1] do
+				// s.@inte_H_t_R_i += ([0.0, 0.0])
+			// end;
+
+  // T0 = select s
+	   // from T0:s-(:e)-:t
+	   // accum
+			// s.@inte_H_t_R_i.update(e.M_id-1, ([s.exId ,e.BIJ * e.Ri_eP])),
+			// t.@inte_H_t_R_i.update(e.M_id-1, [t.exId ,(-1) *e.BIJ * e.Ri_eP]),
+			// s.@inte_H_t_R_i.update(s.exId+@@edgeList.size()-1, [t.exId ,(-1) * e.BIJ * e.Ri_eP]),
+			
+			// s.@H_t_R_i += (t.exId -> s.@inte_H_t_R_i),
+			// t.@H_t_R_i += (s.exId -> t.@inte_H_t_R_i)
+	    // post-accum
+			// s.@inte_H_t_R_i.update(s.exId+@@edgeList.size()-1, [s.exId ,(-1) * s.@sumBi * s.Ri_vP]),
+			// s.@H_t_R_i += (s.exId -> s.@inte_H_t_R_i),
+			// log(true, "htri",s.@H_t_R_i)
+  // ;
+    T0 = select s
+	   from T0:s-(:e)-:t
+	   accum
+			case when (e.reverse == 1) then
+				s.@H_t_R_i+=inte_H_t_R_i(e.M_id, s.exId ,e.BIJ * e.Ri_eP),
+				t.@H_t_R_i+=inte_H_t_R_i(e.M_id, t.exId ,(-1) *e.BIJ * e.Ri_eP),
+				s.@H_t_R_i+=inte_H_t_R_i(s.exId+@@edgeList.size(), t.exId , e.BIJ * e.Ri_eP),
+				t.@H_t_R_i+=inte_H_t_R_i(t.exId+@@edgeList.size(), s.exId , e.BIJ * e.Ri_eP),
+				@@R_all+=inte_r(e.M_id, e.Ri_eP) 
+			when (e.reverse == 0) then
+				s.@H_t_R_i+=inte_H_t_R_i(e.M_id+@@edgeList.size()/2, s.exId ,e.BIJ * e.Ri_eP),
+				t.@H_t_R_i+=inte_H_t_R_i(e.M_id+@@edgeList.size()/2, t.exId ,(-1) *e.BIJ * e.Ri_eP),
+				@@R_all+=inte_r(e.M_id+@@edgeList.size()/2, e.Ri_eP) 
+			end
+	    post-accum
+			s.@H_t_R_i+=inte_H_t_R_i(s.exId+@@edgeList.size(), s.exId , s.@sumBi * s.Ri_vP),
+			@@R_all+=inte_r(s.exId+@@edgeList.size(), s.Ri_vP) 
+  ;
+      T0 = select s
+	   from T0:s-(:e)-:t
+	   accum
+			case when (e.reverse == 1) then
+				s.@H_t+=inte_H_t(e.M_id, s.exId ,e.BIJ),
+				t.@H_t+=inte_H_t(e.M_id, t.exId ,(-1) *e.BIJ),
+				s.@H_t+=inte_H_t(s.exId+@@edgeList.size(), t.exId , e.BIJ),
+				t.@H_t+=inte_H_t(t.exId+@@edgeList.size(), s.exId , e.BIJ)
+			when (e.reverse == 0) then
+				s.@H_t+=inte_H_t(e.M_id+@@edgeList.size()/2, s.exId ,e.BIJ),
+				t.@H_t+=inte_H_t(e.M_id+@@edgeList.size()/2, t.exId ,(-1) *e.BIJ)
+			end
+	    post-accum
+			s.@H_t+=inte_H_t(s.exId+@@edgeList.size(), s.exId , s.@sumBi)
+  ;
+  
+	T0 = select s
+	   from T0:s-(:e)-:t
+			post-accum
+				foreach i in range[1, s.@H_t_R_i.size()] do
+					@@H_R_m_all[s.@H_t_R_i.get(i-1).n-1][s.@H_t_R_i.get(i-1).m-1] +=  s.@H_t_R_i.get(i-1).h
+				END;
+	T0 = select s
+	   from T0:s-(:e)-:t
+			post-accum
+				foreach i in range[1, s.@H_t.size()] do
+					case when (s.@H_t.get(i-1).n-1<@@slackbus-1) then
+						@@H_t_all[s.@H_t.get(i-1).n-1][s.@H_t.get(i-1).m-1] +=  s.@H_t.get(i-1).h,
+						log(true, s.@H_t.get(i-1).n-1),
+						log(true, s.@H_t.get(i-1).m-1)
+					when (s.@H_t.get(i-1).n-1>@@slackbus-1) then
+						@@H_t_all[s.@H_t.get(i-1).n-2][s.@H_t.get(i-1).m-1] +=  s.@H_t.get(i-1).h,
+						log(true, s.@H_t.get(i-1).n-1),
+						log(true, s.@H_t.get(i-1).m-1)
+					end	
+				END;
+	
+	@@slack_bus = @@slackbus;
+	foreach i in range[1, float_to_int(m_c)] do
+		@@H_R_m.reallocate(n_b);
+		@@K_m.reallocate(n_b);
+		foreach j in range[1, float_to_int(n_b)] do
+			@@H_R_m[j-1] = @@H_R_m_all[j-1][i-1];
+		END;
+		cal_result = SE_solve_BDIG_static(@@K_m, @@H_R_m, @@slack_bus); 
+		log(true, @@H_R_m);
+		log(true, @@K_m);
+		foreach j in range[1, float_to_int(n_b)] do
+			@@K_all[j-1][i-1] = @@K_m[j-1];
+		END;
+	END;
+	foreach i in range[1, float_to_int(m_c)] do
+		foreach j in range[1, float_to_int(m_c)] do
+			@@inte_s = 0;
+			foreach k in range[1, float_to_int(n_b)-1] do
+				@@inte_s += @@K_all[k-1][j-1]*@@H_t_all[k-1][i-1];
+			END;
+			case when (i-1 == j-1) then
+				@@S_all[i-1][j-1] = 1 - @@inte_s;
+				// @@S_N_all[i-1][j-1] = @@S_all[i-1][j-1]*sqrt(1/(@@S_all[i-1][j-1]));
+				// log(true, sqrt(@@S_all[i-1][j-1]));
+			else 
+				@@S_all[i-1][j-1] = (-1) * @@inte_s;
+				// @@S_N_all[i-1][j-1] = @@S_all[i-1][j-1]*sqrt(1/(@@S_all[i-1][i-1]));
+			end;
+		END;
+	END;
+	foreach i in range[1, float_to_int(m_c)] do
+		foreach j in range[1, float_to_int(m_c)] do
+			case when (i-1 == j-1) then
+				foreach z in range[1, float_to_int(m_c)] do 
+					case when (@@R_all.get(z-1).m == i) then
+						r_c = 1/@@R_all.get(z-1).R;
+					end;
+				end;
+				@@S_N_all[i-1][j-1] = @@S_all[i-1][j-1]*sqrt(1/(@@S_all[i-1][j-1]))*r_c;
+			else 
+				@@S_N_all[i-1][j-1] = @@S_all[i-1][j-1]*sqrt(1/(@@S_all[i-1][i-1]))*r_c;
+			end;
+		END;
+	END;
+	foreach i in range[1, float_to_int(m_c)] do 
+		foreach j in range[1, float_to_int(m_c)] do
+			case when((abs(@@S_N_all[j-1][i-1])/abs(@@S_N_all[i-1][i-1]))>kc) then
+				@@SIF[i-1][j-1] = 1;
+			End;
+		END;
+	END;
+	// ;
+  // ************************************** Final residual *********************************************
+   	T0 = select s
+	  from T0:s-(:e)-:t
+	  accum
+	  	double newG = 0,
+		double newB = 0,
+		double tap_ratio = abs(e.K/e.Kcount),
+		double tap_ratio_square = (e.K/e.Kcount)*(e.K/e.Kcount),
+		case when (e.K == 0 or abs(e.K) == 1) then
+		   s.@deltaP += s.@Vm*t.@Vm * (-1*e.G*cos(s.@Vs-t.@Vs) + (e.B * sin(s.@Vs - t.@Vs)))
+		else
+		   newG = e.G/tap_ratio,
+		   newB = e.B/tap_ratio,
+		   s.@deltaP += s.@Vm*t.@Vm * (-1*newG*cos(s.@Vs-t.@Vs) + (newB * sin(s.@Vs - t.@Vs)))          
+		end,
+		log(true, e.M_P_TLPF, e.M_id),
+		case when (e.K == 0) then
+			case when (e.reverse == 1) then
+				@@residual[e.M_id-1] += (e.M_P_TLPF - (s.@Vm * s.@Vm * e.G - s.@Vm * t.@Vm * (e.G*cos(s.@Vs - t.@Vs) + (-e.B)*sin(s.@Vs - t.@Vs))))
+			when (e.reverse == 0) then
+				@@residual[e.M_id+@@edgeList.size()/2] += (e.M_P_TLPF - (s.@Vm * s.@Vm * e.G - s.@Vm * t.@Vm * (e.G*cos(s.@Vs - t.@Vs) + (-e.B)*sin(s.@Vs - t.@Vs))))
+			END
+		when (e.K > 0) then
+			case when (e.reverse == 1) then
+				@@residual[e.M_id-1] += (e.M_P_TLPF - (s.@Vm * s.@Vm * (e.G/tap_ratio_square) - s.@Vm * t.@Vm * ((e.G/tap_ratio)*cos(s.@Vs - t.@Vs) + (-e.B/tap_ratio)*sin(s.@Vs - t.@Vs))))
+			when (e.reverse == 0) then
+				@@residual[e.M_id+@@edgeList.size()/2] += (e.M_P_TLPF - (s.@Vm * s.@Vm * (e.G/tap_ratio_square) - s.@Vm * t.@Vm * ((e.G/tap_ratio)*cos(s.@Vs - t.@Vs) + (-e.B/tap_ratio)*sin(s.@Vs - t.@Vs))))
+			END
+		else
+			case when (e.reverse == 1) then
+				@@residual[e.M_id-1] += (e.M_P_TLPF - (s.@Vm * s.@Vm * e.G - s.@Vm * t.@Vm * ((e.G/tap_ratio)*cos(s.@Vs - t.@Vs) + (-e.B/tap_ratio)*sin(s.@Vs - t.@Vs))))
+			when (e.reverse == 0) then
+				@@residual[e.M_id+@@edgeList.size()/2-1] += (e.M_P_TLPF - (s.@Vm * s.@Vm * e.G - s.@Vm * t.@Vm * ((e.G/tap_ratio)*cos(s.@Vs - t.@Vs) + (-e.B/tap_ratio)*sin(s.@Vs - t.@Vs))))
+			END
+		end
+	  post-accum
+		s.@deltaP = s.@P - (s.@deltaP + s.@Vm*s.@Vm*s.@sumG),  
+		@@residual[s.exId+@@edgeList.size()-1] += s.@deltaP
+		;
+	  print @@residual;
+	foreach i in range[1, float_to_int(m_c)] do 
+		foreach z in range[1, float_to_int(m_c)] do 
+			case when (@@R_all.get(z-1).m == i) then
+				r_c = 1/@@R_all.get(z-1).R;
+			end;
+		end;
+		@@residual_N[i-1] = @@residual[i-1]/sqrt(r_c*@@S_all[i-1][i-1]);
+	END;
+    print @@residual_N;
+	kc = gamma*threshold/max(@@residual_N);
+	
+	MNodeSet = {MNode.*};
+	log(true, MNodeSet.size());
+	foreach i in range[1, float_to_int(m_c)] do 
+		case when (abs(@@residual_N[i-1])>threshold) then
+			@@SS[i-1] = 1;
+			INSERT INTO MNode VALUES(ToString(i), i);
+			log(true, MNodeSet.size());
+		end;
+	END;
+	MNodeSet = select s
+	  from MNodeSet:s
+	  post-accum
+			@@M_list+=s,		
+			log(true, s.Mid)
+	;
+	print @@M_list;
+	foreach i in range[1, float_to_int(m_c)] do 
+		foreach j in range[1, float_to_int(m_c)] do
+			case when(@@SS[j-1]>0 and @@SS[i-1]>0) then 
+				case when (@@SIF[i-1][j-1]>0) then
+					@@SIFS[i-1][j-1] += 1;
+					log(true, i, j, @@SS[i-1], @@SS[j-1], @@SIF[i-1][j-1], @@SIFS[i-1][j-1], @@S_N_all[i-1][j-1]);
+					INSERT INTO Medge (FROM, TO) VALUES(i MNode, j MNode);
+				END;
+			End;
+		END;
+	END;
+	log(true, @@visit.size());
+
+	foreach x in @@M_list do 
+		case when (@@visit.size()==0) then
+				Tx = {x};
+				group += 1;
+				log(true,"1", @@visit);
+				@@visit += (group->x);
+				log(true,"2", @@visit);
+				while(con_Tx_s!=Tx.size()) do
+					iter +=1;
+					con_Tx_s = Tx.size(); 
+					Tx = select t 
+						from Tx:s-(Medge:e)-:t
+							accum
+								log(true, s.Mid, t.Mid)
+							post-accum
+							case when (@@visit.get(group).contains(t)==false) then
+								log(true,"3", @@visit),
+								@@visit += (group->t),
+								log(true,"4", @@visit)
+							end
+					;
+					log(true, Tx.size());
+					log(true, con_Tx_s);
+				end;
+		end;
+		iter = 0;
+		con_Tx_s = 0;
+		flg_1 = false;
+		case when (@@visit.size()!=0) then
+			foreach i in range[1, float_to_int(group)] do 
+				log(true, group , x, flg_1, @@visit.get(i).contains(x));
+				flg_1= flg_1 or @@visit.get(i).contains(x);
+			END;
+			case when (flg_1==false) then
+				Tx = {x};
+				group += 1;
+				log(true,"11", @@visit);
+				@@visit += (group->x);
+				log(true,"12", @@visit);
+				while(con_Tx_s!=Tx.size()) do
+					iter +=1;
+					con_Tx_s = Tx.size(); 
+					Tx = select t 
+						from Tx:s-(Medge:e)-:t
+							accum
+								log(true, s.Mid, t.Mid)
+							post-accum
+							case when (@@visit.get(group).contains(t)==false) then
+								log(true,"13", @@visit),
+								@@visit += (group->t),
+								log(true,"14", @@visit)
+							end
+					;
+					log(true, Tx.size());
+					log(true, con_Tx_s);
+				end;
+			end;
+		end;
+	end;
+
+	foreach i in range[1, @@visit.size()] do
+	    iter = 0;
+		con_Tx_s =0;
+		@@inte_residual.clear();
+		@@idx_residual.clear();
+		foreach j in @@visit.get(i) do 
+			N1 = {j};
+			N1 = select t 
+				from N1:s-(Medge:e)-:t
+					post-accum
+						@@inte_residual += @@residual_N[t.Mid-1],
+						@@idx_residual += t.Mid
+		;
+		end;
+		log(true, max(@@inte_residual));
+		foreach k in range[1, @@idx_residual.size()] do
+			case when (con_Tx_s < @@inte_residual.get(k-1)) then
+				con_Tx_s = @@inte_residual.get(k-1);
+				iter = @@idx_residual.get(k-1);
+			END;
+		end;
+		log(true, iter, @@inte_residual, @@idx_residual);
+		@@max_residual+=iter;
+	end;
+	// foreach x in @@M_list do 
+		// log(true,@@visit.get(group).contains(x));
+	// end;
+	print @@max_residual;
+	print @@visit;
+	print @@M_list;
+	print @@SS;
+	
+}
+
+install query state_estimation_weight_solve
+// install query -OPTIMIZE

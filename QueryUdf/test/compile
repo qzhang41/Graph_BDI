@@ -1,0 +1,4 @@
+#!/bin/bash
+
+root_dir="../../../.."
+g++ -Wall -fmessage-length=0 -Wno-unused -fpermissive -fno-omit-frame-pointer -std=c++11 -I$root_dir/src/customer -I$root_dir/src/customer/core_impl/gpe_impl -I$root_dir/gsdk/include -I$root_dir/gsdk/include/third_party -I$root_dir/gsdk/include/third_party/sparsehash/usr/local/include -I$root_dir/gsdk/include/third_party/glog/usr/local/include -I$root_dir/gsdk/include/third_party/jsoncpp/include -I$root_dir/gsdk/include/third_party/redis/deps/hiredis -I$root_dir/gsdk/include/third_party/cereal/include -I$root_dir/gsdk/include/core/gpe -I$root_dir/gsdk/include/core/gse -I$root_dir/gsdk/include/olgp -I$root_dir/gsdk/include/core/topology -I$root_dir/gsdk/include/utility -I$root_dir/gsdk/include/realtime -I$root_dir/gsdk/include/blue -L$root_dir/gsdk/lib/release  -lpthread -ldl -lrt main.cpp -lboost_system

@@ -1,0 +1,6 @@
+drop query add_MNodes
+create query add_MNodes(int i ,int j)
+for graph state_estimation{
+	INSERT INTO MNode VALUES(ToString(i), j);
+}
+install query add_MNodes

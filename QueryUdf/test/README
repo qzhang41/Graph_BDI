@@ -1,0 +1,9 @@
+How to run the Unit Test:
+1. ./compile
+2. ./a.out
+
+Please look at the following files to debug if Unit Test failed:
+├── ExprFunctions.hpp
+├── ExprUtil.hpp
+└── test
+    └── main.cpp

@@ -1,0 +1,6 @@
+drop query add_Medges
+create query add_Medges(int i ,int j)
+for graph state_estimation{
+	INSERT INTO Medge (FROM, TO) VALUES(i MNode, j MNode);
+}
+install query add_Medges

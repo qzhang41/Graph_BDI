@@ -1,0 +1,10 @@
+drop query delt_MNodes
+create query delt_MNodes()
+for graph state_estimation{
+	MNodeSet = {MNode.*};
+	case when (MNodeSet.size()!=0) then
+		DELETE e FROM MNodeSet:s-(Medge:e)->:t;
+		DELETE s FROM MNodeSet:s;
+	end;
+}
+install query delt_MNodes

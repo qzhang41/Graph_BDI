@@ -1,0 +1,9 @@
+drop query test
+create query test() // TotalM is the number of the system's total measurements
+for graph state_estimation{
+	bool flg_BDI = true;
+	 state_estimation_weight_gain();
+	 flg_BDI = state_estimation_weight_solve("/home/tigergraph/output/",1,1,0,0.0001, 20);
+}
+install query test
+// install query -OPTIMIZE

@@ -1,0 +1,339 @@
+// qiwei 06/15/2017
+drop query state_estimation_BDI
+create query state_estimation_BDI()
+for graph state_estimation{
+TYPEDEF tuple<int m, int n, double h> inte_H_t_R_i;	
+TYPEDEF tuple<int m, int n, double h> inte_H_t;	
+TYPEDEF tuple<int m, double R> inte_r;	
+TYPEDEF tuple<int s, int t> bus2bus;	
+SumAccum<double> @deltaP = 0; // store each bus deltaP
+string cal_result;
+ double n_b = 0;
+ double m_c = 0;
+ double r_c = 0;
+ double kc = 0;
+ double gamma = 0.4;
+ double threshold = 3;
+ double flg_BDI = 0;
+ SumAccum<double> @sumG = 0; // store for each node the total G on all of its edges
+ SumAccum<double> @sumBi = 0; // store for each node the total 1/X (BIJ) on all of its edges		
+ SumAccum<int> @@slackbus = 0;
+ ListAccum<inte_H_t_R_i> @H_t_R_i;
+ ListAccum<inte_H_t> @H_t;
+ ListAccum<inte_r> @@R_all;
+ ListAccum<vertex> @@M_list;
+ ArrayAccum<SumAccum<double>> @@H_R_m_all[][];
+ ArrayAccum<SumAccum<double>> @@H_t_all[][];
+ ArrayAccum<SumAccum<double>> @@K_all[][];
+ ArrayAccum<SumAccum<double>> @@H_R_m[];
+ ArrayAccum<SumAccum<double>> @@K_m[];
+ ArrayAccum<SumAccum<double>> @@K_m_all[][];
+ ArrayAccum<SumAccum<double>> @@S_all[][];
+ ArrayAccum<SumAccum<double>> @@S_N_all[][];
+ // ListAccum<ListAccum<double>> @@SITS[];
+ // ListAccum<double> @@inte_SITS[];
+ ArrayAccum<SumAccum<double>> @@SIF[][];
+ ArrayAccum<SumAccum<double>> @@SIFS[][];
+ ArrayAccum<SumAccum<double>> @@SS[];
+ // ArrayAccum<SumAccum<double>> @@SITS[][];
+ ArrayAccum<SumAccum<double>> @@residual[];
+ ArrayAccum<SumAccum<double>> @@residual_N[];
+ ListAccum<double> @@inte_residual;
+ ListAccum<double> @@idx_residual;
+ ListAccum<double> @@max_residual;
+ MaxAccum<double> @@slack_bus = 0;
+ SumAccum<double> @@inte_s = 0;
+ SumAccum<double> @visit_v = 0;
+ double group = 0;
+ ListAccum<edge> @@edgeList;
+ MapAccum<double, ListAccum<vertex>> @@visit;
+ SumAccum<double> @mid = 0;
+ int m_count = 0;
+ 
+ArrayAccum<SumAccum<int>> @@S_N_p[];
+ArrayAccum<SumAccum<int>> @@S_N_store[];
+MapAccum<bus2bus, double> @@M_id_set;
+ListAccum<bus2bus> @@M_l;
+
+ T0 = {GNode.*}; //start from all vertices in the graph
+ T0 = select s
+	 from T0:s-(:e)-:t
+	 accum
+		@@M_id_set+=(bus2bus(s.exId, t.exId)->0),
+		@@M_l+=bus2bus(s.exId, t.exId)
+	;
+
+foreach key in @@M_l do 
+	m_count+=1;
+	@@M_id_set+= (key -> m_count);
+	log(true, @@M_id_set.get(key), key);
+End;
+ T0 = select s
+	 from T0:s-(:e)-:t
+	 accum
+		case when (@@M_id_set.containsKey(bus2bus(s.exId, t.exId))) then
+			case when (e.reverse==1) then
+				e.M_id += @@M_id_set.get(bus2bus(s.exId, t.exId))
+			End,
+			case when (e.reverse == 0) then
+			    e.M_id += @@M_id_set.get(bus2bus(s.exId, t.exId))
+			End
+		end
+	 post-accum
+		s.M_id += @@M_id_set.size()+s.exId
+	;
+ T0 = select s
+ from T0:s-(:e)-:t
+ accum
+			log(true,"2222222222222222", e.M_id, s.exId, t.exId)
+ post-accum
+			log(true,"22222222222222222", s.M_id)
+;
+ n_b = T0.size(); 
+ T0 = select s
+	  from T0:s-(:e)-:t
+	  accum
+		@@edgeList+=e,
+		case when (e.K == 0) then 
+           s.@sumG += e.G,
+		   s.@sumBi += -1*e.BIJ
+		when (e.K > 0) then
+           double tap_ratio_square = (e.K/e.Kcount)*(e.K/e.Kcount),
+		   double tap_ratio = e.K/e.Kcount,
+		   s.@sumG += 1/(tap_ratio_square)*e.G,
+		   s.@sumBi += -1*e.BIJ  // for P
+		else
+		   double tap_ratio_square = (e.K/e.Kcount)*(e.K/e.Kcount),
+		   double tap_ratio = abs(e.K/e.Kcount),
+		   s.@sumG += e.G,
+		   s.@sumBi += -1*e.BIJ
+	    end
+	  post-accum
+		s.@sumG += s.G,
+		CASE WHEN (s.flag == 3) THEN
+			@@slackbus += s.exId
+		END
+	;
+m_c =  n_b+@@edgeList.size();
+@@H_R_m_all.reallocate(n_b, m_c);
+@@H_t_all.reallocate(n_b-1, m_c);
+@@H_R_m.reallocate(n_b);
+@@K_m_all.reallocate(n_b, m_c);
+@@K_m.reallocate(n_b);
+@@K_all.reallocate(n_b-1, m_c);
+@@S_all.reallocate(m_c, m_c);
+@@S_N_all.reallocate(m_c, m_c);
+@@residual.reallocate(m_c);
+@@residual_N.reallocate(m_c);
+@@SIF.reallocate(m_c, m_c);
+@@SIFS.reallocate(m_c, m_c);
+@@SS.reallocate(m_c);
+@@S_N_p.reallocate(m_c);
+@@S_N_store.reallocate(m_c*m_c);
+// *************************residual calculation****************************************
+	  // //log(true, @@residual);
+	  T0 = select s
+	  from T0:s-(:e)-:t
+	  accum
+	  	double newG = 0,
+		double newB = 0,
+		double tap_ratio = abs(e.K/e.Kcount),
+		double tap_ratio_square = (e.K/e.Kcount)*(e.K/e.Kcount),
+		//log(true,"//log //log", s.@deltaP, s.Vm, s.Va),
+		case when (e.K == 0 or abs(e.K) == 1) then
+		   s.@deltaP += s.Vm*t.Vm * (-1*e.G*cos(s.Va-t.Va) + (e.B * sin(s.Va - t.Va)))
+		else
+		   newG = e.G/tap_ratio,
+		   newB = e.B/tap_ratio,
+		   s.@deltaP += s.Vm*t.Vm * (-1*newG*cos(s.Va-t.Va) + (newB * sin(s.Va - t.Va)))          
+		end,
+		//log(true, e.M_P_TLPF, e.M_id),
+		case when (e.K == 0) then
+			case when (e.reverse == 1) then
+				@@residual[e.M_id-1] += (e.M_P_TLPF - (s.Vm * s.Vm * e.G - s.Vm * t.Vm * (e.G*cos(s.Va - t.Va) + (-e.B)*sin(s.Va - t.Va))))
+			when (e.reverse == 0) then
+				@@residual[e.M_id-1] += (e.M_P_TLPF - (s.Vm * s.Vm * e.G - s.Vm * t.Vm * (e.G*cos(s.Va - t.Va) + (-e.B)*sin(s.Va - t.Va))))
+			END
+		when (e.K > 0) then
+			case when (e.reverse == 1) then
+				@@residual[e.M_id-1] += (e.M_P_TLPF - (s.Vm * s.Vm * (e.G/tap_ratio_square) - s.Vm * t.Vm * ((e.G/tap_ratio)*cos(s.Va - t.Va) + (-e.B/tap_ratio)*sin(s.Va - t.Va))))
+			when (e.reverse == 0) then
+				@@residual[e.M_id-1] += (e.M_P_TLPF - (s.Vm * s.Vm * (e.G/tap_ratio_square) - s.Vm * t.Vm * ((e.G/tap_ratio)*cos(s.Va - t.Va) + (-e.B/tap_ratio)*sin(s.Va - t.Va))))
+			END
+		else
+			case when (e.reverse == 1) then
+				@@residual[e.M_id-1] += (e.M_P_TLPF - (s.Vm * s.Vm * e.G - s.Vm * t.Vm * ((e.G/tap_ratio)*cos(s.Va - t.Va) + (-e.B/tap_ratio)*sin(s.Va - t.Va))))
+			when (e.reverse == 0) then
+				@@residual[e.M_id-1] += (e.M_P_TLPF - (s.Vm * s.Vm * e.G - s.Vm * t.Vm * ((e.G/tap_ratio)*cos(s.Va - t.Va) + (-e.B/tap_ratio)*sin(s.Va - t.Va))))
+			END
+		end
+	  post-accum
+		s.@deltaP = s.P - (s.@deltaP + s.Vm*s.Vm*s.@sumG),  
+		@@residual[s.M_id-1] += s.@deltaP
+		// log(true,"wwwwwwwwwwwwwwwwwwwww",s.exId+@@edgeList.size(),s.P, (s.@deltaP + s.Vm*s.Vm*s.@sumG))
+		;
+	  log(true, @@residual);
+	  //log(true, @@residual);
+//*****************H***************	
+	   T0 = select s
+	   from T0:s-(:e)-:t
+	   accum
+			case when (e.reverse == 1) then
+				@@H_R_m_all[e.M_id-1][s.exId.m-1] +=  e.BIJ * e.Ri_eP,
+				@@H_R_m_all[e.M_id-1][t.exId.m-1] += (-1) *e.BIJ * e.Ri_eP,	
+				@@H_R_m_all[s.M_id-1][t.exId.m-1] += e.BIJ * e.Ri_eP,	
+				@@H_R_m_all[t.M_id-1][s.exId.m-1] += e.BIJ * e.Ri_eP,					
+				// s.@H_t_R_i+=inte_H_t_R_i(e.M_id, s.exId ,e.BIJ * e.Ri_eP),
+				// t.@H_t_R_i+=inte_H_t_R_i(e.M_id, t.exId ,(-1) *e.BIJ * e.Ri_eP),
+				// s.@H_t_R_i+=inte_H_t_R_i(s.M_id, t.exId , e.BIJ * e.Ri_eP),
+				// t.@H_t_R_i+=inte_H_t_R_i(t.M_id, s.exId , e.BIJ * e.Ri_eP),
+				@@R_all+=inte_r(e.M_id, e.Ri_eP) 
+			when (e.reverse == 0) then
+				// s.@H_t_R_i+=inte_H_t_R_i(e.M_id, s.exId ,e.BIJ * e.Ri_eP),
+				// t.@H_t_R_i+=inte_H_t_R_i(e.M_id, t.exId ,(-1) *e.BIJ * e.Ri_eP),
+				@@H_R_m_all[e.M_id-1][s.exId.m-1] +=  e.BIJ * e.Ri_eP,
+				@@H_R_m_all[e.M_id-1][t.exId.m-1] += (-1) *e.BIJ * e.Ri_eP,	
+				@@R_all+=inte_r(e.M_id, e.Ri_eP) 
+			end
+	    post-accum
+			// s.@H_t_R_i+=inte_H_t_R_i(s.M_id, s.exId , s.@sumBi * s.Ri_vP),
+			@@H_R_m_all[s.M_id-1][s.exId.m-1] += s.@sumBi * s.Ri_vP,
+			@@R_all+=inte_r(s.M_id, s.Ri_vP) 
+  ;
+      T0 = select s
+	   from T0:s-(:e)-:t
+	   accum
+			case when (e.reverse == 1) then
+				s.@H_t+=inte_H_t(e.M_id, s.exId ,e.BIJ),
+				t.@H_t+=inte_H_t(e.M_id, t.exId ,(-1) *e.BIJ),
+				s.@H_t+=inte_H_t(s.M_id, t.exId , e.BIJ),
+				t.@H_t+=inte_H_t(t.M_id, s.exId , e.BIJ)
+			when (e.reverse == 0) then
+				s.@H_t+=inte_H_t(e.M_id, s.exId ,e.BIJ),
+				t.@H_t+=inte_H_t(e.M_id, t.exId ,(-1) *e.BIJ)
+			end
+	    post-accum
+			s.@H_t+=inte_H_t(s.M_id, s.exId , s.@sumBi)
+  ;
+  
+	// T0 = select s
+	   // from T0:s-(:e)-:t
+			// post-accum
+				// foreach i in range[1, s.@H_t_R_i.size()] do
+					// @@H_R_m_all[s.@H_t_R_i.get(i-1).n-1][s.@H_t_R_i.get(i-1).m-1] +=  s.@H_t_R_i.get(i-1).h
+				// END;
+	T0 = select s
+	   from T0:s-(:e)-:t
+			post-accum
+				foreach i in range[1, s.@H_t.size()] do
+					case when (s.@H_t.get(i-1).n-1<@@slackbus-1) then
+						@@H_t_all[s.@H_t.get(i-1).n-1][s.@H_t.get(i-1).m-1] +=  s.@H_t.get(i-1).h
+						//log(true, s.@H_t.get(i-1).n-1),
+						//log(true, s.@H_t.get(i-1).m-1)
+					when (s.@H_t.get(i-1).n-1>@@slackbus-1) then
+						@@H_t_all[s.@H_t.get(i-1).n-2][s.@H_t.get(i-1).m-1] +=  s.@H_t.get(i-1).h
+						//log(true, s.@H_t.get(i-1).n-1),
+						//log(true, s.@H_t.get(i-1).m-1)
+					end	
+				END;
+// log(true,"11111111111111111111111111");
+//*********************K**************
+	@@slack_bus = @@slackbus;
+	foreach i in range[1, float_to_int(m_c)] do
+		@@H_R_m.reallocate(n_b);
+		@@K_m.reallocate(n_b);
+		foreach j in range[1, float_to_int(n_b)] do
+			@@H_R_m[j-1] = @@H_R_m_all[j-1][i-1];
+		END;
+		cal_result = SE_solve_BDIG_static(@@K_m, @@H_R_m, @@slack_bus); 
+		//log(true, @@H_R_m);
+		//log(true, @@K_m);
+		foreach j in range[1, float_to_int(n_b)-1] do
+			@@K_all[j-1][i-1] = @@K_m[j-1];
+		END;
+	END;
+// log(true,"2222222222222222222222");
+matrix_KH_cal(m_c, n_b-1,@@K_all, @@H_t_all, @@S_all);
+//*********************S******************
+// log(true,"3333333333333333333333333333");
+	foreach i in range[1, float_to_int(m_c)] do
+		foreach j in range[1, float_to_int(m_c)] do
+			case when (i-1 == j-1) then
+				foreach z in range[1, float_to_int(m_c)] do 
+					case when (@@R_all.get(z-1).m == i) and (@@R_all.get(z-1).R!=0) then
+						r_c = 1/@@R_all.get(z-1).R;
+						//log(true, @@R_all.get(z-1).R);
+					when (@@R_all.get(z-1).m == i) and (@@R_all.get(z-1).R==0) then
+						r_c = 0;
+					end;
+				end;
+				@@S_N_all[i-1][j-1] = @@S_all[i-1][j-1]*sqrt(1/(@@S_all[i-1][j-1]))*r_c;
+			else 
+				@@S_N_all[i-1][j-1] = @@S_all[i-1][j-1]*sqrt(1/(@@S_all[i-1][i-1]))*r_c;
+			end;
+		END;
+	END;
+	// foreach i in range[1, float_to_int(m_c)] do 
+		// foreach j in range[1, float_to_int(m_c)] do
+			// log(true,i ,j ,@@S_all[i-1][j-1]);
+			// log(true,i ,j ,@@S_N_all[i-1][j-1]);
+		// END;
+	// END;
+// log(true,"33333333333333333333333333333");
+	store_S(@@S_N_all, m_c);
+// log(true,"4444444444444444444444444444444");
+	// get_S_1();
+// ***************SIF*************************
+	foreach i in range[1, float_to_int(m_c)] do 
+		foreach z in range[1, float_to_int(m_c)] do 
+			case when (@@R_all.get(z-1).m == i) and (@@R_all.get(z-1).R!=0) then
+				r_c = 1/@@R_all.get(z-1).R;
+				//log(true, @@R_all.get(z-1).R);
+			when (@@R_all.get(z-1).m == i) and (@@R_all.get(z-1).R==0) then
+				r_c = 0;
+			end;
+		end;
+		case when (r_c!=0) then
+			@@residual_N[i-1] = abs(@@residual[i-1]/sqrt(r_c*@@S_all[i-1][i-1]));
+		when (r_c==0) then
+			@@residual_N[i-1] = 0;
+		end; 
+	END;
+	log(true, @@residual_N);
+	kc = gamma*threshold/max(@@residual_N);
+	foreach i in range[1, float_to_int(m_c)] do 
+		foreach j in range[1, float_to_int(m_c)] do
+			case when (abs(@@S_N_all[i-1][i-1])!=0) then
+				case when((abs(@@S_N_all[j-1][i-1])/abs(@@S_N_all[i-1][i-1]))>kc) then
+					@@SIF[i-1][j-1] = 1;
+				End;
+			End;
+		END;
+	END;
+//***************SS*************************	
+	foreach i in range[1, float_to_int(m_c)] do 
+		case when (abs(@@residual_N[i-1])>threshold) then
+			flg_BDI = 1;
+			@@SS[i-1] = 1;
+			INSERT INTO MNode VALUES(ToString(i), i, @@residual_N[i-1], @@residual[i-1]);
+			// add_MNodes(i ,i);
+		end;
+	END;
+	print flg_BDI;
+//***************SIFS*************************
+	foreach i in range[1, float_to_int(m_c)] do 
+		foreach j in range[1, float_to_int(m_c)] do
+			case when(@@SS[j-1]>0 and @@SS[i-1]>0) then 
+				case when (@@SIF[i-1][j-1]>0) then
+					@@SIFS[i-1][j-1] += 1;
+					// log(true, i, j, @@SS[i-1], @@SS[j-1], @@SIF[i-1][j-1], @@SIFS[i-1][j-1], @@S_N_all[i-1][j-1]);
+					INSERT INTO Medge (FROM, TO) VALUES(i MNode, j MNode);
+					// add_Medges(i, j);
+				END;
+			End;
+		END;
+	END;
+	log(true, @@visit.size());
+}
+install query -ui state_estimation_BDI
+// install query -OPTIMIZE

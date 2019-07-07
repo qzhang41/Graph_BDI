@@ -1,0 +1,7 @@
+get_inverse.obj
+get_inverse_initialize.obj
+get_inverse_terminate.obj
+inv.obj
+xgetrf.obj
+xswap.obj
+xtrsm.obj

@@ -1,0 +1,24 @@
+// qiwei 06/15/2017
+drop query SE_BDI
+create query SE_BDI() // TotalM is the number of the system's total measurements
+for graph state_estimation{
+ bool flg_BDI = true;
+ int cc = 0;
+ while (flg_BDI == true)
+ {
+	 state_estimation_weight_gain();
+	 flg_BDI = state_estimation_weight_solve("/home/tigergraph/output/",1,1,0,0.0001, 20);
+	 log(true, flg_BDI);
+	 case when (flg_BDI == true) then
+		state_estimation_BDI();
+	 End;
+	 SITS_R();
+	 delt_MNodes();
+	 cc+=1;
+	 case when (cc>4) then
+		break;
+	 end;
+ }
+}
+install query SE_BDI
+// install query -OPTIMIZE
