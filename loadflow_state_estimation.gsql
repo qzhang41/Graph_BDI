@@ -10,15 +10,15 @@ drop job load_flow
 create loading job load_flow for graph state_estimation
 {  
 	// load "/home/tigergraph/qiwei/input/IEEE118_nodeinfo_se.csv"
-	load "/home/tigergraph/qiwei/input/IEEE14_node_bd.csv"
-  	// load "/home/tigergraph/qiwei/input/sc_20160818_1120.QS_nodeinfo_mod_se.csv"
+	// load "/home/tigergraph/qiwei/input/IEEE14_node_bd.csv"
+  	load "/home/tigergraph/qiwei/input/sc_20160818_1120.QS_nodeinfo_mod_se.csv"
 
     to vertex GNode values($"bus_id", $"bus_id", $"type", $"M_P", $"M_Q", $"G", $"B", $"voltage", $"angle", 0, $"M_Vm", $"M_Va", $"Ri_V", $"Ri_vP", $"Ri_vQ", $"bus_name",0) 
   using  Separator=",", Header="true";
   
 	// load "/home/tigergraph/qiwei/input/IEEE118_edgeinfo_se.csv"
-	load "/home/tigergraph/qiwei/input/IEEE14_branches_bd.csv"
-	// load "/home/tigergraph/qiwei/input/sc_20160818_1120.QS_edgeinfo_mod_se.csv"
+	// load "/home/tigergraph/qiwei/input/IEEE14_branches_bd.csv"
+	load "/home/tigergraph/qiwei/input/sc_20160818_1120.QS_edgeinfo_mod_se.csv"
 
     to edge connected values($0, $1,reduce(add(_getG($"R", $"X"))),reduce(add(_getB($"R", $"X"))), reduce(add($"B")), reduce(add($"transformer_final_turns_ratio")), reduce(add(1)), reduce(add(divide($"X"))), reduce(add($"M_P_TLPF")), reduce(add($"M_Q_TLPF")), _, _, _, $"Ri_eP", $"Ri_eQ", 1, 0), //where to_float($4) == 1,
  	

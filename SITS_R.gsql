@@ -36,8 +36,8 @@ ListAccum<edge> @@edgeList;
 	MNodeSet = select s
 	  from MNodeSet:s
 	  post-accum
-			@@M_list+=s
-			// log(true, s.Mid)
+			@@M_list+=s,
+			log(true,"11111111111111111", s.Mid)
 	;
 	print @@M_list;
 	foreach x in @@M_list do 
@@ -50,8 +50,8 @@ ListAccum<edge> @@edgeList;
 					con_Tx_s = Tx.size(); 
 					Tx = select t 
 						from Tx:s-(Medge:e)-:t
-							// accum
-								// log(true, s.Mid, t.Mid)
+							accum
+								log(true,"2222222222222", s.Mid, t.Mid)
 							post-accum
 							case when (@@visit.get(group).contains(t)==false) then
 								@@visit += (group->t)
