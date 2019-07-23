@@ -18,26 +18,25 @@ string cal_result;
  SumAccum<double> @sumG = 0; // store for each node the total G on all of its edges
  SumAccum<double> @sumBi = 0; // store for each node the total 1/X (BIJ) on all of its edges		
  SumAccum<int> @@slackbus = 0;
- ListAccum<inte_H_t_R_i> @H_t_R_i;
- ListAccum<inte_H_t> @H_t;
- ListAccum<inte_r> @@R_all;
+ ListAccum<inte_H_t_R_i> @H_t_R_i;// H transpose * R^(-1)
+ ListAccum<inte_H_t> @H_t;// H transpose
+ ListAccum<inte_r> @@R_all; //weight for each measurement
  ListAccum<vertex> @@M_list;
- ArrayAccum<SumAccum<double>> @@H_R_m_all[][];
- ArrayAccum<SumAccum<double>> @@H_t_all[][];
- ArrayAccum<SumAccum<double>> @@K_all[][];
- ArrayAccum<SumAccum<double>> @@H_R_m[];
- ArrayAccum<SumAccum<double>> @@K_m[];
- ArrayAccum<SumAccum<double>> @@K_m_all[][];
- ArrayAccum<SumAccum<double>> @@S_all[][];
- ArrayAccum<SumAccum<double>> @@S_N_all[][];
+ ArrayAccum<SumAccum<double>> @@H_R_m_all[][]; // H * R matrix
+ ArrayAccum<SumAccum<double>> @@H_t_all[][]; // H transpose
+ ArrayAccum<SumAccum<double>> @@K_all[][];// K matrix
+ ArrayAccum<SumAccum<double>> @@H_R_m[];// sliced H*R vector
+ ArrayAccum<SumAccum<double>> @@K_m[];// sliced K vector
+ ArrayAccum<SumAccum<double>> @@S_all[][];// S matrix
+ ArrayAccum<SumAccum<double>> @@S_N_all[][];// normalized S matrix
  // ListAccum<ListAccum<double>> @@SITS[];
  // ListAccum<double> @@inte_SITS[];
- ArrayAccum<SumAccum<double>> @@SIF[][];
- ArrayAccum<SumAccum<double>> @@SIFS[][];
- ArrayAccum<SumAccum<double>> @@SS[];
+ ArrayAccum<SumAccum<double>> @@SIF[][]; // set of influenced set
+ ArrayAccum<SumAccum<double>> @@SIFS[][];// set of influenced suspect set
+ ArrayAccum<SumAccum<double>> @@SS[];// suspect set
  // ArrayAccum<SumAccum<double>> @@SITS[][];
- ArrayAccum<SumAccum<double>> @@residual[];
- ArrayAccum<SumAccum<double>> @@residual_N[];
+ ArrayAccum<SumAccum<double>> @@residual[]; // residual set
+ ArrayAccum<SumAccum<double>> @@residual_N[]; // normalized residual set
  ListAccum<double> @@inte_residual;
  ListAccum<double> @@idx_residual;
  ListAccum<double> @@max_residual;
@@ -55,7 +54,7 @@ ArrayAccum<SumAccum<int>> @@S_N_store[];
 MapAccum<bus2bus, double> @@M_id_set;
 ListAccum<bus2bus> @@M_l;
 
- T0 = {GNode.*}; //start from all vertices in the graph
+ T0 = {GNode.*}; //start from all vertices in the graph. assign measurement ID
  T0 = select s
 	 from T0:s-(:e)-:t
 	 accum
@@ -82,13 +81,13 @@ End;
 	 post-accum
 		s.M_id += @@M_id_set.size()+s.exId
 	;
- T0 = select s
- from T0:s-(:e)-:t
- accum
-			log(true,"2222222222222222", e.M_id, s.exId, t.exId)
- post-accum
-			log(true,"22222222222222222", s.M_id)
-;
+ // T0 = select s
+ // from T0:s-(:e)-:t
+ // accum
+			// log(true,"2222222222222222", e.M_id, s.exId, t.exId)
+ // post-accum
+			// log(true,"22222222222222222", s.M_id)
+// ;
  n_b = T0.size(); 
  T0 = select s
 	  from T0:s-(:e)-:t
@@ -118,7 +117,6 @@ m_c =  n_b+@@edgeList.size();
 @@H_R_m_all.reallocate(n_b, m_c);
 @@H_t_all.reallocate(n_b-1, m_c);
 @@H_R_m.reallocate(n_b);
-@@K_m_all.reallocate(n_b, m_c);
 @@K_m.reallocate(n_b);
 @@K_all.reallocate(n_b, m_c);
 @@S_all.reallocate(m_c, m_c);
@@ -278,64 +276,64 @@ m_c =  n_b+@@edgeList.size();
 			@@H_R_m[j-1] = @@H_R_m_all[j-1][i-1];
 		END;
 		cal_result = SE_solve_BDIG_static(@@K_m, @@H_R_m, @@slack_bus); 
-		// foreach j in range[1, float_to_int(n_b)] do
-			// @@K_all[j-1][i-1] = @@K_m[j-1];
-		// END;
-		T0 = {GNode.*};
-		T0 = select s
-	    from T0:s-(:e)-:t
-		accum
-			double k_t = 0,
-			double k_s = 0,
-			case when (t.exId > @@slack_bus) then
-				 k_t = BDI_getK(t.exId-2, @@K_m)
-			when (t.exId < @@slack_bus) then
-				 k_t = BDI_getK(t.exId-1, @@K_m)
-			end,
-			case when (s.exId > @@slack_bus) then
-				k_s = BDI_getK(s.exId-2, @@K_m)
-			when (s.exId < @@slack_bus) then
-				k_s = BDI_getK(s.exId-1, @@K_m)
-			end,
-			case when (t.exId != @@slack_bus) then
-				 @@S_all[s.M_id-1][i-1] += e.BIJ*k_t  // - H*K
-			End,
-			case when (e.M_id==i) then
-				case when (s.exId != @@slack_bus and t.exId != @@slack_bus) then 
-					@@S_all[e.M_id-1][i-1] += 1 - e.BIJ*(k_s - k_t)
-				when (s.exId != @@slack_bus and t.exId == @@slack_bus) then
-					@@S_all[e.M_id-1][i-1] += 1 - e.BIJ*(k_s)
-				else
-					@@S_all[e.M_id-1][i-1] += 1 - e.BIJ*((-1)*k_t)
-				End
-			else 
-				case when (s.exId != @@slack_bus and t.exId != @@slack_bus) then 
-					@@S_all[e.M_id-1][i-1] += (-1)* e.BIJ*(k_s - k_t)	
-				when (s.exId != @@slack_bus and t.exId == @@slack_bus) then
-					@@S_all[e.M_id-1][i-1] += (-1)* e.BIJ*(k_s)
-				else
-					@@S_all[e.M_id-1][i-1] += (-1)* e.BIJ*((-1)* k_t)
-				End
-			END
-		post-accum
-			double k_ss = 0,
-			case when (s.exId > @@slack_bus) then
-				k_ss = BDI_getK(s.exId-2, @@K_m)
-			when (s.exId < @@slack_bus) then
-				k_ss = BDI_getK(s.exId-1, @@K_m)
-			end,
-			case when (s.exId!=@@slack_bus) then
-				case when (s.M_id==i) then
-					@@S_all[s.M_id-1][i-1] += 1 - s.@sumBi*k_ss // I - H*K
-				else
-					@@S_all[s.M_id-1][i-1] += s.@sumBi*k_ss  // I - H*K
-				END
-			ENd
-		;
+		foreach j in range[1, float_to_int(n_b)] do
+			@@K_all[j-1][i-1] = @@K_m[j-1];
+		END;
+		// T0 = {GNode.*};
+		// T0 = select s
+	    // from T0:s-(:e)-:t
+		// accum
+			// double k_t = 0,
+			// double k_s = 0,
+			// case when (t.exId > @@slack_bus) then
+				 // k_t = BDI_getK(t.exId-2, @@K_m)
+			// when (t.exId < @@slack_bus) then
+				 // k_t = BDI_getK(t.exId-1, @@K_m)
+			// end,
+			// case when (s.exId > @@slack_bus) then
+				// k_s = BDI_getK(s.exId-2, @@K_m)
+			// when (s.exId < @@slack_bus) then
+				// k_s = BDI_getK(s.exId-1, @@K_m)
+			// end,
+			// case when (t.exId != @@slack_bus) then
+				 // @@S_all[s.M_id-1][i-1] += e.BIJ*k_t  // - H*K
+			// End,
+			// case when (e.M_id==i) then
+				// case when (s.exId != @@slack_bus and t.exId != @@slack_bus) then 
+					// @@S_all[e.M_id-1][i-1] += 1 - e.BIJ*(k_s - k_t)
+				// when (s.exId != @@slack_bus and t.exId == @@slack_bus) then
+					// @@S_all[e.M_id-1][i-1] += 1 - e.BIJ*(k_s)
+				// else
+					// @@S_all[e.M_id-1][i-1] += 1 - e.BIJ*((-1)*k_t)
+				// End
+			// else 
+				// case when (s.exId != @@slack_bus and t.exId != @@slack_bus) then 
+					// @@S_all[e.M_id-1][i-1] += (-1)* e.BIJ*(k_s - k_t)	
+				// when (s.exId != @@slack_bus and t.exId == @@slack_bus) then
+					// @@S_all[e.M_id-1][i-1] += (-1)* e.BIJ*(k_s)
+				// else
+					// @@S_all[e.M_id-1][i-1] += (-1)* e.BIJ*((-1)* k_t)
+				// End
+			// END
+		// post-accum
+			// double k_ss = 0,
+			// case when (s.exId > @@slack_bus) then
+				// k_ss = BDI_getK(s.exId-2, @@K_m)
+			// when (s.exId < @@slack_bus) then
+				// k_ss = BDI_getK(s.exId-1, @@K_m)
+			// end,
+			// case when (s.exId!=@@slack_bus) then
+				// case when (s.M_id==i) then
+					// @@S_all[s.M_id-1][i-1] += 1 - s.@sumBi*k_ss // I - H*K
+				// else
+					// @@S_all[s.M_id-1][i-1] += s.@sumBi*k_ss  // I - H*K
+				// END
+			// ENd
+		// ;
 	END;
 
 //*********************S******************
-// matrix_KH_cal(m_c, n_b-1,@@K_all, @@H_t_all, @@S_all);
+matrix_KH_cal(m_c, n_b-1,@@K_all, @@H_t_all, @@S_all);
 	// foreach i in range[1, float_to_int(m_c)] do
 		// foreach j in range[1, float_to_int(m_c)] do
 			// @@inte_s = 0;
