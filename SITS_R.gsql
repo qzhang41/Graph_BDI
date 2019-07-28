@@ -25,6 +25,7 @@ double group = 0;
 uint id= 0;
 ListAccum<edge> @@edgeList;
 //***************SITS*************************
+	log(true,"start SR");
 	T0 = {GNode.*}; //start from all vertices in the graph
 	T0 = select s
 		 from T0:s-(:e)-:t
